@@ -177,19 +177,13 @@ class NNsightModel:
             with torch.inference_mode(mode=inference):
                 with HookModel(
                     self.local_model,
-                    list(graph.argument_node_names.keys()),
+                    list(graph.argument_nodes.keys()),
                     input_hook=lambda activations, module_path: intervene(
                         activations, module_path, graph, "input"
                     ),
                     output_hook=lambda activations, module_path: intervene(
                         activations, module_path, graph, "output"
-                    ),
-                    backward_input_hook=lambda activations, module_path: intervene(
-                        activations, module_path, graph, "backward_input"
-                    ),
-                    backward_output_hook=lambda activations, module_path: intervene(
-                        activations, module_path, graph, "backward_output"
-                    ),
+                    )
                 ):
                     output = fn(inputs, *args, **kwargs)
 

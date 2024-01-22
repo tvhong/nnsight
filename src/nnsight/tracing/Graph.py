@@ -29,7 +29,7 @@ class Graph:
         name_idx (Dict[str, int]): Mapping of node target_name to number of previous names with the same target_name.
             Used so names are unique.
         module_proxy (Proxy): Proxy for given root meta module.
-        argument_node_names (Dict[str, List[str]]): Map of name of argument to name of nodes that depend on it.
+        argument_nodes (Dict[str, List[List[str], List[int], List[int]]]): Map of name of argument to name of lists of (node names, current call counter, call idx)
         generation_idx (int): Current generation index.
         swap (Node): Attribute to store swap values from 'swp' nodes.
     """
@@ -126,7 +126,7 @@ class Graph:
         self.name_idx: Dict[str, int] = dict()
 
         self.module_proxy = self.add(value=module, target="module")
-        self.argument_node_names: Dict[str, List[str]] = dict()
+        self.argument_nodes: Dict[str, List[List[str], List[int], List[int]]] = dict()
 
         self.generation_idx = 0
 
@@ -184,8 +184,17 @@ class Graph:
 
         self.generation_idx = 0
 
+        self.reset_counters()
+
         # Setting the root module kicks off the graph execution.
         self.nodes["module_0"].set_value(module)
+
+    def reset_counters(self):
+
+        for names, counters, call_idxs in self.argument_nodes.values():
+
+            counters.clear()
+            counters.extend(call_idxs)
 
     def add(
         self,
@@ -253,12 +262,13 @@ class Graph:
             self.nodes[name] = node
 
             if target_name == "argument":
-                module_path = args[0]
+                module_path, _, _, call_idx = args
 
-                if module_path not in self.argument_node_names:
-                    self.argument_node_names[module_path] = []
+                if module_path not in self.argument_nodes:
+                    self.argument_nodes[module_path] = [[],[],[]]
 
-                self.argument_node_names[module_path].append(name)
+                self.argument_nodes[module_path][0].append(name)
+                self.argument_nodes[module_path][2].append(call_idx)
 
         return self.proxy(node)
 
@@ -292,7 +302,7 @@ class Graph:
             self.compile(module)
 
             # Gets list of all argument nodes for this graph.
-            argument_nodes_list = list(self.argument_node_names.values())
+            argument_nodes_list = list(self.argument_nodes.values())
 
             # Sets the result of the argument nodes for args.
             for i, arg in enumerate(args):
@@ -300,8 +310,8 @@ class Graph:
 
             # And then for kwargs.
             for key in kwargs:
-                if key in self.argument_node_names:
-                    self.nodes[self.argument_node_names[key][0]].set_value(arg)
+                if key in self.argument_nodes:
+                    self.nodes[self.argument_nodes[key][0]].set_value(arg)
 
             # should have the value we need to return.
             return_value = self.swap

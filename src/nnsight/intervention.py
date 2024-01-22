@@ -230,15 +230,28 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
     # Key to module activation argument nodes has format: <module path>.<output/input>.<generation index>
     module_path = f"{module_path}.{key}.{graph.generation_idx}"
 
-    if module_path in graph.argument_node_names:
-        argument_node_names = graph.argument_node_names[module_path]
+    if module_path in graph.argument_nodes:
+        argument_node_names, argument_call_counters, _ = graph.argument_nodes[module_path]
 
         # multiple argument nodes can have same module_path if there are multiple invocations.
-        for argument_node_name in argument_node_names:
+        for arg_idx, argument_node_name in enumerate(argument_node_names):
+
+            # If the call counter is not 0 yet, decrement and continue.
+            if argument_call_counters[arg_idx] > 0:
+
+                argument_call_counters[arg_idx] -= 1
+
+                continue
+
+            # If its already been called dont call again.
+            if argument_call_counters[arg_idx] == -1:
+
+                continue
+
             node = graph.nodes[argument_node_name]
 
-            # args for argument nodes are (module_path, batch_size, batch_start)
-            _, batch_size, batch_start = node.args
+            # args for argument nodes are (module_path, batch_size, batch_start, call_itr)
+            _, batch_size, batch_start, _ = node.args
 
             # We set its result to the activations, indexed by only the relevant batch idxs.
 
@@ -255,6 +268,8 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
             value = graph.get_swap(value)
 
             activations = concat(activations, value, batch_start, batch_size)
+
+            argument_call_counters[arg_idx] -= 1
 
     return activations
 
@@ -321,24 +336,6 @@ class HookModel(AbstractContextManager):
                     return self.output_hook(output, module_path)
 
                 self.handles.append(module.register_forward_hook(output_hook))
-
-            elif hook_type == "backward_input":
-
-                def backward_input_hook(module, input, output, module_path=module_path):
-                    return self.backward_input_hook(input, module_path)
-
-                self.handles.append(
-                    module.register_full_backward_hook(backward_input_hook)
-                )
-
-            elif hook_type == "backward_output":
-
-                def backward_output_hook(module, output, module_path=module_path):
-                    return self.backward_output_hook(output, module_path)
-
-                self.handles.append(
-                    module.register_full_backward_pre_hook(backward_output_hook)
-                )
 
         return self
 

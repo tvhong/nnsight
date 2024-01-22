@@ -62,8 +62,6 @@ class Module(torch.nn.Module):
 
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
-        self._backward_output: InterventionProxy = None
-        self._backward_input: InterventionProxy = None
 
         self._graph: Graph = None
 
@@ -72,8 +70,17 @@ class Module(torch.nn.Module):
     def clear(self):
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
-        self._backward_output: InterventionProxy = None
-        self._backward_input: InterventionProxy = None
+
+        self._call_idx = 0
+
+    def next(self, increment: int = 1):
+
+        self._call_idx += increment
+
+        self._output = None
+        self._input = None
+
+        return self
 
     def __call__(
         self, *args: List[Any], **kwds: Dict[str, Any]
@@ -120,6 +127,7 @@ class Module(torch.nn.Module):
                     f"{self.module_path}.output.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
                     self.tracer.batch_start,
+                    self._call_idx
                 ],
             )
 
@@ -161,6 +169,7 @@ class Module(torch.nn.Module):
                     f"{self.module_path}.input.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
                     self.tracer.batch_start,
+                    self._call_idx
                 ],
             )
 

@@ -77,6 +77,121 @@ class Mamba(LanguageModel):
             **kwargs,
         )
 
+class SSM(torch.nn.Module):
+
+    class DeltaA(torch.nn.Module):
+
+        def forward(self, delta, A):
+
+            return torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
+        
+    class DeltaB(torch.nn.Module):
+
+        def forward(self, delta, B, u, is_variable_B, dim):
+
+            if not is_variable_B:
+                deltaB_u = torch.einsum('bdl,dn,bdl->bdln', delta, B, u)
+            else:
+                if B.dim() == 3:
+                    deltaB_u = torch.einsum('bdl,bnl,bdl->bdln', delta, B, u)
+                else:
+                    B = repeat(B, "B G N L -> B (G H) N L", H=dim // B.shape[1])
+                    deltaB_u = torch.einsum('bdl,bdnl,bdl->bdln', delta, B, u)
+
+            return deltaB_u
+    class Hx(torch.nn.Module):
+
+        def forward(self, deltaA,  deltaB_x, h, idx):
+
+            return deltaA[:, :, idx] * h + deltaB_x[:, :, idx]
+        
+    class Yh(torch.nn.Module):
+
+        def forward(self, h, C, idx, is_variable_C):
+            if not is_variable_C:
+                y = torch.einsum('bdn,dn->bd', h, C)
+            else:
+                if C.dim() == 3:
+                    y = torch.einsum('bdn,bn->bd', h, C[:, :, idx])
+                else:
+                    y = torch.einsum('bdn,bdn->bd', h, C[:, :, :, idx])
+
+            if y.is_complex():
+                y = y.real * 2
+
+            return y
+
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.deltaA = SSM.DeltaA()
+        self.deltaB = SSM.DeltaB()
+        self.hx = SSM.Hx()
+        self.yh = SSM.Yh()
+
+    def forward(self, x, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
+                      return_last_state=False):
+
+        dtype_in = x.dtype
+        x = x.float()
+        delta = delta.float()
+
+        if delta_bias is not None:
+            delta = delta + delta_bias[..., None].float()
+
+        if delta_softplus:
+            delta = F.softplus(delta)
+
+        batch, dim, dstate = x.shape[0], A.shape[0], A.shape[1]
+
+        is_variable_B = B.dim() >= 3
+        is_variable_C = C.dim() >= 3
+
+        if A.is_complex():
+            if is_variable_B:
+                B = torch.view_as_complex(rearrange(B.float(), "... (L two) -> ... L two", two=2))
+            if is_variable_C:
+                C = torch.view_as_complex(rearrange(C.float(), "... (L two) -> ... L two", two=2))
+        else:
+            B = B.float()
+            C = C.float()
+        
+        ys = []
+
+        deltaA = self.deltaA(delta, A)
+
+        deltaB_x = self.deltaB(delta, B, x, is_variable_B, dim)
+
+        if is_variable_C and C.dim() == 4:
+            C = repeat(C, "B G N L -> B (G H) N L", H=dim // C.shape[1])
+
+        last_state = None
+
+        h = A.new_zeros((batch, dim, dstate))
+
+        for i in range(x.shape[2]):
+
+            h = self.hx(deltaA, deltaB_x, h, i)
+
+            y = self.yh(h, C, i, is_variable_C)
+ 
+            if i == x.shape[2] - 1:
+                last_state = h
+
+            ys.append(y)
+
+        y = torch.stack(ys, dim=2) # (batch dim L)
+
+        out = y if D is None else y + x * rearrange(D, "d -> d 1")
+
+        if z is not None:
+            out = out * F.silu(z)
+
+        out = out.to(dtype=dtype_in)
+
+        return out if not return_last_state else (out, last_state)
 
 class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
     def __init__(self, *args, **kwargs):
@@ -85,6 +200,8 @@ class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
         self.dt = WrapperModule()
         self.B = WrapperModule()
         self.C = WrapperModule()
+
+        self.ssm = SSM()
 
     def forward(self, hidden_states, inference_params=None):
         """
@@ -102,14 +219,12 @@ class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
                 return out
 
         # We do matmul and transpose BLH -> HBL at the same time
-        
         xz = rearrange(
             self.in_proj(hidden_states),
             "b l d -> b d l",
             l=seqlen,
         )
         
-
         A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
         # In the backward pass we write dx and dz next to each other to avoid torch.cat
 
@@ -139,7 +254,7 @@ class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
         B = self.B(B)
         C = self.C(C)
 
-        y = mamba_ssm.ops.selective_scan_interface.selective_scan_ref(
+        y = self.ssm(
             x,
             dt,
             A,
