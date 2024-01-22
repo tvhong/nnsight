@@ -6,10 +6,14 @@ import causal_conv1d_cuda
 import mamba_ssm
 import selective_scan_cuda
 import torch
+import torch.nn.functional as F
+from einops import rearrange, repeat
 from mamba_ssm import MambaLMHeadModel
 from mamba_ssm.models.config_mamba import MambaConfig
 from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
 from transformers import AutoTokenizer, BatchEncoding, PreTrainedModel
+
+from nnsight.util import WrapperModule
 
 from ..patching import Patch, Patcher
 from .LanguageModel import LanguageModel
@@ -72,3 +76,103 @@ class Mamba(LanguageModel):
             max_length=max_length,
             **kwargs,
         )
+
+
+class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.dt = WrapperModule()
+        self.B = WrapperModule()
+        self.C = WrapperModule()
+
+    def forward(self, hidden_states, inference_params=None):
+        """
+        hidden_states: (B, L, D)
+        Returns: same shape as hidden_states
+        """
+        batch, seqlen, dim = hidden_states.shape
+
+        conv_state, ssm_state = None, None
+        if inference_params is not None:
+            conv_state, ssm_state = self._get_states_from_cache(inference_params, batch)
+            if inference_params.seqlen_offset > 0:
+                # The states are updated inplace
+                out, _, _ = self.step(hidden_states, conv_state, ssm_state)
+                return out
+
+        # We do matmul and transpose BLH -> HBL at the same time
+        
+        xz = rearrange(
+            self.in_proj(hidden_states),
+            "b l d -> b d l",
+            l=seqlen,
+        )
+        
+
+        A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
+        # In the backward pass we write dx and dz next to each other to avoid torch.cat
+
+        x, z = xz.chunk(2, dim=1)
+
+        # Compute short convolution
+        if conv_state is not None:
+            # If we just take x[:, :, -self.d_conv :], it will error if seqlen < self.d_conv
+            # Instead F.pad will pad with zeros if seqlen < self.d_conv, and truncate otherwise.
+            conv_state.copy_(
+                F.pad(x, (self.d_conv - x.shape[-1], 0))
+            )  # Update state (B D W)
+            
+        x = self.act(self.conv1d(x)[..., :seqlen])
+
+        x_dbl = self.x_proj(rearrange(x, "b d l -> (b l) d"))  # (bl d)
+        dt, B, C = torch.split(
+            x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1
+        )
+        dt = self.dt_proj(dt).t()
+
+        dt = rearrange(dt, "d (b l) -> b d l", l=seqlen)
+        B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
+        C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
+
+        dt = self.dt(dt)
+        B = self.B(B)
+        C = self.C(C)
+
+        y = mamba_ssm.ops.selective_scan_interface.selective_scan_ref(
+            x,
+            dt,
+            A,
+            B,
+            C,
+            self.D.float(),
+            z=z,
+            delta_bias=None,
+            delta_softplus=True,
+            return_last_state=ssm_state is not None,
+        )
+        if ssm_state is not None:
+            y, last_state = y
+            ssm_state.copy_(last_state)
+        y = rearrange(y, "b d l -> b l d")
+        out = self.out_proj(y)
+
+        return out
+
+
+class MambaInterp(Mamba):
+    def __init__(self, *args, **kwargs):
+    
+        patcher = Patcher()
+
+        patcher.add(
+            Patch(
+                mamba_ssm.models.mixer_seq_simple,
+                MambaModuleInterp,
+                "Mamba",
+            )
+        )
+
+        patcher.__enter__()
+
+        super().__init__(*args, **kwargs)
