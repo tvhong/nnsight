@@ -23,8 +23,9 @@ class Mamba(LanguageModel):
     def _load_meta(
         self, repoid_or_path, *args, device=None, **kwargs
     ) -> PreTrainedModel:
-        self.tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
-        self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        if self.tokenizer is None:
+            self.tokenizer = AutoTokenizer.from_pretrained(repoid_or_path, padding_side='left')
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         config_data = load_config_hf(repoid_or_path)
         self.config = MambaConfig(**config_data)
         return MambaLMHeadModel(self.config, device="meta", dtype=None, **kwargs)

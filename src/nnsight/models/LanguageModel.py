@@ -53,10 +53,12 @@ class LanguageModel(NNsightModel):
     def _load_meta(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
         self.config = AutoConfig.from_pretrained(repoid_or_path, *args, **kwargs)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            repoid_or_path, config=self.config, padding_side="left"
-        )
-        self.tokenizer.pad_token = self.tokenizer.eos_token
+        if self.tokenizer is None:
+
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                repoid_or_path, config=self.config, padding_side="left"
+            )
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
         return self.automodel.from_config(self.config, trust_remote_code=True)
 
