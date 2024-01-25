@@ -80,42 +80,29 @@ class Mamba(LanguageModel):
 
 class SSM(torch.nn.Module):
 
-    class DeltaA(torch.nn.Module):
+    class DiscA(torch.nn.Module):
 
         def forward(self, delta, A):
 
             return torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
         
-    class DeltaB(torch.nn.Module):
+    class DiscB(torch.nn.Module):
 
-        def forward(self, delta, B, u, is_variable_B, dim):
+        def forward(self, delta, B):
 
-            if not is_variable_B:
-                deltaB_u = torch.einsum('bdl,dn,bdl->bdln', delta, B, u)
-            else:
-                if B.dim() == 3:
-                    deltaB_u = torch.einsum('bdl,bnl,bdl->bdln', delta, B, u)
-                else:
-                    B = repeat(B, "B G N L -> B (G H) N L", H=dim // B.shape[1])
-                    deltaB_u = torch.einsum('bdl,bdnl,bdl->bdln', delta, B, u)
-
-            return deltaB_u
+            return torch.einsum('bdl,bnl->bdln', delta, B)
+        
     class Hx(torch.nn.Module):
 
-        def forward(self, deltaA,  deltaB_x, h, idx):
+        def forward(self, deltaA: torch.Tensor, deltaB: torch.Tensor, x: torch.Tensor, h: torch.Tensor):
 
-            return deltaA[:, :, idx] * h + deltaB_x[:, :, idx]
+            return deltaA * h + torch.einsum('bdn,bd->bdn', deltaB, x)
         
     class Yh(torch.nn.Module):
 
-        def forward(self, h, C, idx, is_variable_C):
-            if not is_variable_C:
-                y = torch.einsum('bdn,dn->bd', h, C)
-            else:
-                if C.dim() == 3:
-                    y = torch.einsum('bdn,bn->bd', h, C[:, :, idx])
-                else:
-                    y = torch.einsum('bdn,bdn->bd', h, C[:, :, :, idx])
+        def forward(self, h, C):
+       
+            y = torch.einsum('bdn,bn->bd', h, C)
 
             if y.is_complex():
                 y = y.real * 2
@@ -127,58 +114,45 @@ class SSM(torch.nn.Module):
 
         super().__init__()
 
-        self.deltaA = SSM.DeltaA()
-        self.deltaB = SSM.DeltaB()
+        self.discA = SSM.DiscA()
+        self.discB = SSM.DiscB()
         self.hx = SSM.Hx()
         self.yh = SSM.Yh()
 
-    def forward(self, x, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
+    def forward(self, x, delta, A, B, C, D=None, z=None,
                       return_last_state=False):
 
         dtype_in = x.dtype
+
         x = x.float()
         delta = delta.float()
 
-        if delta_bias is not None:
-            delta = delta + delta_bias[..., None].float()
-
-        if delta_softplus:
-            delta = F.softplus(delta)
-
         batch, dim, dstate = x.shape[0], A.shape[0], A.shape[1]
 
-        is_variable_B = B.dim() >= 3
-        is_variable_C = C.dim() >= 3
-
         if A.is_complex():
-            if is_variable_B:
-                B = torch.view_as_complex(rearrange(B.float(), "... (L two) -> ... L two", two=2))
-            if is_variable_C:
-                C = torch.view_as_complex(rearrange(C.float(), "... (L two) -> ... L two", two=2))
+            B = torch.view_as_complex(rearrange(B.float(), "... (L two) -> ... L two", two=2))
+            C = torch.view_as_complex(rearrange(C.float(), "... (L two) -> ... L two", two=2))
         else:
             B = B.float()
             C = C.float()
         
-        ys = []
+        deltaA = self.discA(delta, A)
 
-        deltaA = self.deltaA(delta, A)
-
-        deltaB_x = self.deltaB(delta, B, x, is_variable_B, dim)
-
-        if is_variable_C and C.dim() == 4:
-            C = repeat(C, "B G N L -> B (G H) N L", H=dim // C.shape[1])
+        deltaB = self.discB(delta, B)
 
         last_state = None
 
         h = A.new_zeros((batch, dim, dstate))
 
-        for i in range(x.shape[2]):
+        ys = []
 
-            h = self.hx(deltaA, deltaB_x, h, i)
+        for token_idx in range(x.shape[2]):
 
-            y = self.yh(h, C, i, is_variable_C)
+            h = self.hx(deltaA[:, :, token_idx], deltaB[:, :, token_idx], x[:, :, token_idx], h)
+
+            y = self.yh(h, C[:, :, token_idx])
  
-            if i == x.shape[2] - 1:
+            if token_idx == x.shape[2] - 1:
                 last_state = h
 
             ys.append(y)
@@ -204,6 +178,8 @@ class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
 
         self.ssm = SSM()
 
+        self.delta_softplus = torch.nn.Softplus()
+
     def forward(self, hidden_states, inference_params=None):
         """
         hidden_states: (B, L, D)
@@ -227,8 +203,8 @@ class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
         )
         
         A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
-        # In the backward pass we write dx and dz next to each other to avoid torch.cat
 
+        # In the backward pass we write dx and dz next to each other to avoid torch.cat
         x, z = xz.chunk(2, dim=1)
 
         # Compute short convolution
@@ -255,6 +231,8 @@ class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
         B = self.B(B)
         C = self.C(C)
 
+        dt = self.delta_softplus(dt)
+
         y = self.ssm(
             x,
             dt,
@@ -263,14 +241,14 @@ class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
             C,
             self.D.float(),
             z=z,
-            delta_bias=None,
-            delta_softplus=True,
             return_last_state=ssm_state is not None,
         )
         if ssm_state is not None:
             y, last_state = y
             ssm_state.copy_(last_state)
+
         y = rearrange(y, "b d l -> b l d")
+
         out = self.out_proj(y)
 
         return out
