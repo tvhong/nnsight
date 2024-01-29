@@ -93,8 +93,7 @@ class LanguageModel(NNsightModel):
 
         if not isinstance(inputs[0], str):
             inputs = [{"input_ids": ids} for ids in inputs]
-
-            return self.tokenizer.pad(inputs, return_tensors="pt")
+            return self.tokenizer.pad(inputs, return_tensors="pt", **kwargs)
 
         return self.tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
 
@@ -114,18 +113,25 @@ class LanguageModel(NNsightModel):
         **kwargs,
     ) -> BatchEncoding:
         if isinstance(inputs, dict):
-            _inputs = self._tokenize(inputs["input_ids"], **kwargs)
+
+            new_inputs = dict()
+
+            tokenized_inputs = self._tokenize(inputs["input_ids"], **kwargs)
+
+            new_inputs['input_ids'] = tokenized_inputs['input_ids']
 
             if "attention_mask" in inputs:
                 for ai, attn_mask in enumerate(inputs["attention_mask"]):
-                    _inputs["attention_mask"][ai, -len(attn_mask) :] = attn_mask
+                    tokenized_inputs["attention_mask"][ai, -len(attn_mask) :] = attn_mask
+
+                new_inputs["attention_mask"] = tokenized_inputs["attention_mask"]
 
             if "labels" in inputs:
                 labels = self._tokenize(inputs["labels"], **kwargs)
 
-                _inputs["labels"] = labels["input_ids"]
+                new_inputs["labels"] = labels["input_ids"]
 
-            return _inputs
+            return BatchEncoding(new_inputs)
 
         inputs = self._tokenize(inputs, **kwargs)
 
