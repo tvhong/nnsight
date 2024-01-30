@@ -94,9 +94,28 @@ class SSM(torch.nn.Module):
         
     class Hx(torch.nn.Module):
 
+
+        class Bx(torch.nn.Module):
+
+            def forward(self, deltaB: torch.Tensor, x: torch.Tensor):
+
+                return torch.einsum('bdn,bd->bdn', deltaB, x)
+
+        class Ah(torch.nn.Module):
+
+            def forward(self, deltaA: torch.Tensor, h: torch.Tensor):
+
+                return  deltaA * h
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+
+            self.bx = SSM.Hx.Bx()
+            self.ah = SSM.Hx.Ah()
+
         def forward(self, deltaA: torch.Tensor, deltaB: torch.Tensor, x: torch.Tensor, h: torch.Tensor):
 
-            return deltaA * h + torch.einsum('bdn,bd->bdn', deltaB, x)
+            return self.ah(deltaA, h) + self.bx(deltaB, x)
         
     class Yh(torch.nn.Module):
 
@@ -146,6 +165,7 @@ class SSM(torch.nn.Module):
 
         ys = []
 
+        # Main recurrence loop
         for token_idx in range(x.shape[2]):
 
             h = self.hx(deltaA[:, :, token_idx], deltaB[:, :, token_idx], x[:, :, token_idx], h)
