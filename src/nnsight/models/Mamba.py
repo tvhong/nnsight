@@ -24,7 +24,9 @@ class Mamba(LanguageModel):
         self, repoid_or_path, *args, device=None, **kwargs
     ) -> PreTrainedModel:
         if self.tokenizer is None:
-            self.tokenizer = AutoTokenizer.from_pretrained(repoid_or_path, padding_side='left')
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                repoid_or_path, padding_side="left"
+            )
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         config_data = load_config_hf(repoid_or_path)
         self.config = MambaConfig(**config_data)
@@ -78,34 +80,24 @@ class Mamba(LanguageModel):
             **kwargs,
         )
 
+
 class SSM(torch.nn.Module):
-
     class DiscA(torch.nn.Module):
-
         def forward(self, delta, A):
+            return torch.exp(torch.einsum("bdl,dn->bdln", delta, A))
 
-            return torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
-        
     class DiscB(torch.nn.Module):
-
         def forward(self, delta, B):
+            return torch.einsum("bdl,bnl->bdln", delta, B)
 
-            return torch.einsum('bdl,bnl->bdln', delta, B)
-        
     class Hx(torch.nn.Module):
-
-
         class Bx(torch.nn.Module):
-
             def forward(self, deltaB: torch.Tensor, x: torch.Tensor):
-
-                return torch.einsum('bdn,bd->bdn', deltaB, x)
+                return torch.einsum("bdn,bd->bdn", deltaB, x)
 
         class Ah(torch.nn.Module):
-
             def forward(self, deltaA: torch.Tensor, h: torch.Tensor):
-
-                return  deltaA * h
+                return deltaA * h
 
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
@@ -113,24 +105,25 @@ class SSM(torch.nn.Module):
             self.bx = SSM.Hx.Bx()
             self.ah = SSM.Hx.Ah()
 
-        def forward(self, deltaA: torch.Tensor, deltaB: torch.Tensor, x: torch.Tensor, h: torch.Tensor):
-
+        def forward(
+            self,
+            deltaA: torch.Tensor,
+            deltaB: torch.Tensor,
+            x: torch.Tensor,
+            h: torch.Tensor,
+        ):
             return self.ah(deltaA, h) + self.bx(deltaB, x)
-        
-    class Yh(torch.nn.Module):
 
+    class Yh(torch.nn.Module):
         def forward(self, h, C):
-       
-            y = torch.einsum('bdn,bn->bd', h, C)
+            y = torch.einsum("bdn,bn->bd", h, C)
 
             if y.is_complex():
                 y = y.real * 2
 
             return y
 
-
     def __init__(self):
-
         super().__init__()
 
         self.discA = SSM.DiscA()
@@ -138,9 +131,7 @@ class SSM(torch.nn.Module):
         self.hx = SSM.Hx()
         self.yh = SSM.Yh()
 
-    def forward(self, x, delta, A, B, C, D=None, z=None,
-                      return_last_state=False):
-
+    def forward(self, x, delta, A, B, C, D=None, z=None, return_last_state=False):
         dtype_in = x.dtype
 
         x = x.float()
@@ -149,12 +140,16 @@ class SSM(torch.nn.Module):
         batch, dim, dstate = x.shape[0], A.shape[0], A.shape[1]
 
         if A.is_complex():
-            B = torch.view_as_complex(rearrange(B.float(), "... (L two) -> ... L two", two=2))
-            C = torch.view_as_complex(rearrange(C.float(), "... (L two) -> ... L two", two=2))
+            B = torch.view_as_complex(
+                rearrange(B.float(), "... (L two) -> ... L two", two=2)
+            )
+            C = torch.view_as_complex(
+                rearrange(C.float(), "... (L two) -> ... L two", two=2)
+            )
         else:
             B = B.float()
             C = C.float()
-        
+
         deltaA = self.discA(delta, A)
 
         deltaB = self.discB(delta, B)
@@ -167,17 +162,18 @@ class SSM(torch.nn.Module):
 
         # Main recurrence loop
         for token_idx in range(x.shape[2]):
-
-            h = self.hx(deltaA[:, :, token_idx], deltaB[:, :, token_idx], x[:, :, token_idx], h)
+            h = self.hx(
+                deltaA[:, :, token_idx], deltaB[:, :, token_idx], x[:, :, token_idx], h
+            )
 
             y = self.yh(h, C[:, :, token_idx])
- 
+
             if token_idx == x.shape[2] - 1:
                 last_state = h
 
             ys.append(y)
 
-        y = torch.stack(ys, dim=2) # (batch dim L)
+        y = torch.stack(ys, dim=2)  # (batch dim L)
 
         out = y if D is None else y + x * rearrange(D, "d -> d 1")
 
@@ -187,6 +183,7 @@ class SSM(torch.nn.Module):
         out = out.to(dtype=dtype_in)
 
         return out if not return_last_state else (out, last_state)
+
 
 class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
     def __init__(self, *args, **kwargs):
@@ -221,7 +218,7 @@ class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
             "b l d -> b d l",
             l=seqlen,
         )
-        
+
         A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
 
         # In the backward pass we write dx and dz next to each other to avoid torch.cat
@@ -234,7 +231,7 @@ class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
             conv_state.copy_(
                 F.pad(x, (self.d_conv - x.shape[-1], 0))
             )  # Update state (B D W)
-            
+
         x = self.act(self.conv1d(x)[..., :seqlen])
 
         x_dbl = self.x_proj(rearrange(x, "b d l -> (b l) d"))  # (bl d)
@@ -276,7 +273,6 @@ class MambaModuleInterp(mamba_ssm.modules.mamba_simple.Mamba):
 
 class MambaInterp(Mamba):
     def __init__(self, *args, **kwargs):
-    
         patcher = Patcher()
 
         patcher.add(
