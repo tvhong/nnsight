@@ -1,11 +1,17 @@
-from jaxtyping import Float, Int
+"""NNsight implementation of Edge Attribution Patching (arXiv:2310.10348)
+This implementation is largely based on the Can and Aaquib's version in TransformerLens
+Link to repo: https://github.com/canrager/clas/blob/main/tl_utils.py
+"""
+
 import torch as t
+
 from torch import Tensor 
-from typing import Dict
-from typing import Callable, List, Union
+from jaxtyping import Float, Int
+from typing import Dict, Callable, List, Union
 import numpy as np
 
-from transformer_lens import HookedTransformer, HookedTransformerConfig
+from nnsight import UnifiedTransformer
+from transformer_lens import HookedTransformerConfig
 
 class EAP:
 
@@ -96,7 +102,7 @@ class EAP:
 
     def run(
         self,
-        model,
+        model: UnifiedTransformer,
         clean_tokens: Int[Tensor, "batch_size seq_len"],
         corrupted_tokens: Int[Tensor, "batch_size seq_len"],
         # TODO: Implement batch_size
@@ -111,7 +117,7 @@ class EAP:
         upstream_activations_difference = t.zeros(
             (batch_size, seq_len, self.n_upstream_nodes, self.d_model),
             device=self.device,
-            dtype=model.cfg.dtype,
+            dtype=model.config.dtype,
             requires_grad=False
         )
         
@@ -191,13 +197,12 @@ class EAP:
 
         self.eap_scores = self.eap_scores.cpu()
 
-
     def top_edges(
             self,
-            n=1000,
-            threshold=None,
-            abs_scores=True,
-            format = False,
+            n: int = 1000,
+            threshold: float = None,
+            abs_scores: bool = True,
+            format: bool = False,
         ):
 
         # get indices of maximum values in 2d tensor
