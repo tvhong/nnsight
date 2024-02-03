@@ -1,5 +1,5 @@
 """NNsight implementation of Edge Attribution Patching (arXiv:2310.10348)
-This implementation is largely based on the Can and Aaquib's version in TransformerLens
+This implementation is based on Can and Aaquib's version in TransformerLens
 Link to repo: https://github.com/canrager/clas/blob/main/tl_utils.py
 """
 
@@ -10,7 +10,7 @@ from jaxtyping import Float, Int
 from typing import Dict, Callable, List, Union
 import numpy as np
 
-from nnsight import UnifiedTransformer
+from nnsight.models.UnifiedTransformer import UnifiedTransformer
 from transformer_lens import HookedTransformerConfig
 
 class EAP:
